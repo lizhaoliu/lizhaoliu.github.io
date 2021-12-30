@@ -26,7 +26,7 @@ There can (probably will) be mistakes in my writing, and what you see here may b
 - Metaflow: 2.4.7
 - OS: macOS Monterey 12.0.1
 
-### A Branched Workflow
+### A Sample Workflow
 
 Starting with a simple workflow:
 
@@ -79,6 +79,66 @@ graph LR;
     a --> join;
     b --> join;
     join --> END;
+```
+
+### Role of a Step
+
+Conceptually, a `step` wears one of three hats:
+
+#### Linear
+
+A `linear` step has exactly one parent step and one child step.
+
+```mermaid
+graph LR;
+    A --> Linear --> B;
+```
+
+#### Fan-Out
+
+A `fan-out` step has one parent step but two or more child steps, or one child step to be executed multiple times.
+
+- Branched fan-out, child steps are predefined in the workflow.
+
+```mermaid
+graph LR;
+    A --> Fan-Out;
+    Fan-Out --> B;
+    Fan-Out --> C;
+```
+
+- Foreach/parallel fan-out, where the number of child steps is not known in advance.
+
+```mermaid
+graph LR;
+    A --> Fan-Out;
+    Fan-Out --> B;
+    Fan-Out --> B;
+    Fan-Out --> B;
+```
+
+#### Join (Fan-In)
+
+A `join` step has `fan-out` parent step(s) and one child step, the child step is executed once all the parent steps are
+completed.
+
+- Join from branched fan-out.
+
+```mermaid
+graph LR;
+    A --> Join;
+    B --> Join;
+    Join --> C; 
+```
+
+- Join from foreach/parallel fan-out.
+
+```mermaid
+graph LR;
+    A --> Join;
+    A --> Join;
+    A --> Join;
+    Join --> C; 
 ```
 
 ### Things that Metaflow Does for You
@@ -731,7 +791,7 @@ The `lint` module (`metaflow/lint.py`) contains a set of validity checks that ar
 see all the prerequisites Metaflow enforces. Should any of the checks fail, Metaflow raises an exception and tells you
 what and where the error is.
 
-There are 15 checks in total, and I'll summarize them here:
+There are 15 checks in total, summarized below:
 
 * `check_reserved_words`: step name cannot be a reserved word {`name`, `next`, `input`, `index`, `cmd`}.
 * `check_basic_steps`: graph must have `start` and `end` steps.
@@ -746,9 +806,8 @@ There are 15 checks in total, and I'll summarize them here:
 * `check_for_acyclicity`: DAG must not contain cycles.
 * `check_for_orphans`: all steps must be reachable from `start`.
 * `check_split_join_balance`:
-    * All fan-out steps must be joined prior to `end`.
-    * (note: this may be a bug) A `join` step's parents must match the most recent fan-out steps, such that the
-      following graph is illegal:
+    * All fan-out steps must be joined before `end` is reached.
+    * Any `join` step's parents must all have the _same_ fan-out step. The following graphs are illegal:
 
 ```mermaid
 graph LR
@@ -759,6 +818,23 @@ graph LR
     aa --> join;
     ab --> join;
     b --> join;
+    join --> END;
+```
+
+```mermaid
+graph LR
+    start --> a;
+    start --> b;
+    a --> aa;
+    a --> ab;
+    b --> ba;
+    b --> bb;
+    aa --> ja;
+    ab --> jb;
+    ba --> ja;
+    bb --> jb;
+    ja --> join;
+    jb --> join;
     join --> END;
 ```
 

@@ -2,21 +2,19 @@
 
 ## Introduction
 
-[Metaflow](https://metaflow.org/) is a popular open-source Python framework for building fast and scalable data science
-workflows, originally developed within Netflix. It is quite intuitive to use, and is designed to be used in a
-semi-declarative way.
+[Metaflow](https://metaflow.org/) is an open-source Python framework developed by Netflix for building fast and scalable
+data science and ML workflows. It offers a concise set of intuitive yet powerful APIs, enabling users to focus on
+expressing their workflow logic.
 
 If you are new to Metaflow, here are some well written [tutorials](https://docs.metaflow.org/getting-started/install) to
 get started.
 
 ### Why I Wrote This
 
-Metaflow codebase is not a colossus, and it's a rewarding learning experience digesting the source code without being
-overwhelmed. In this series of articles, I'll be focusing on walking through implementation details of Metaflow, instead
-of on the general idea of how to use it. Note that I may add/remove comments in the original source code to help with
-the guidance.
-
-There can (probably will) be mistakes in my writing, and what you see here may be outdated at some point.
+Recently I joined Netflix to work on Metaflow, and I'm keen on learning everything about it. Metaflow codebase is not
+colossal, and I find it a rewarding learning experience digesting the source code, without getting overwhelmed. In this
+series of articles, I'll be focusing on walking through implementation details of Metaflow. These posts will serve as my
+notes as well as reference for you.
 
 ## Entering the Playground
 
@@ -28,7 +26,7 @@ There can (probably will) be mistakes in my writing, and what you see here may b
 
 ### A Sample Workflow
 
-Starting with a simple workflow:
+Let's start with a simple workflow:
 
 ```python
 from metaflow import FlowSpec, step
@@ -66,15 +64,18 @@ if __name__ == '__main__':
     BranchFlow()
 ```
 
-* The user-defined workflow class inherits from `FlowSpec`.
-* Each method in `BranchFlow` that is decorated with `@step` is a step/stage in the workflow. In Metaflow world, a flow
-  should always begin with `start` and finishes at `end`.
-* The `self.next` function is invoked exactly once at the end of each step to specify the next step (_transition_). The
-  entire workflow is logically structured as a _directed acyclic graph (DAG)_, and it is executed accordingly.
+There are a couple of requirements for this workflow to work:
+
+* The user-defined workflow class (`BranchFlow`) inherits from `FlowSpec`.
+* Each method that is decorated with `@step` becomes a step/stage in the workflow. A valid flow should begin
+  with `start` and finishes at `end`.
+* The `self.next` function is invoked exactly once at the end of each step to specify the next step (_transition_) to
+  execute. The entire workflow is logically structured as a _directed acyclic graph (DAG)_, and it is executed
+  accordingly.
 
 ![](../images/simple-workflow.png)
 
-### Role of a Step
+### Types of a Step
 
 Conceptually, a `step` wears one of three hats:
 
@@ -111,7 +112,7 @@ completed. This is the place to process the gathered results from parent fan-out
 
 ### The `@step` Decorator
 
-Before we go right in, let's look at the `@step` decorator in `metaflow/decorators.py`:
+Before we move on, let's look at the `@step` decorator in `metaflow/decorators.py`:
 
 ```python
 def step(f):
@@ -129,12 +130,12 @@ def step(f):
     return f
 ```
 
-Pretty straightforward. It marks a method as a step in the workflow simply by adding an attribute `is_step` to it, then
-later Metaflow recognizes it by checking the presence of that attribute.
+Clearly, it marks a method as a `step` simply by adding an attribute `is_step` to it, such that Metaflow can recognize
+it later by checking the presence of that attribute.
 
 ### Lifecycle of a Metaflow Run
 
-By running the code of `BranchFlow` example, following output can be observed:
+By running the code of `BranchFlow` example, following output (or similar) can be observed:
 
 ```text
 Metaflow 2.4.7 executing BranchFlow for user:lizhaoliu
@@ -159,21 +160,19 @@ Running pylint...
 2021-12-29 09:24:13.428 Done!
 ```
 
-From the log, we see that Metaflow has done the following work sequentially:
+We can see that Metaflow did the following things sequentially:
 
 ![](../images/workflow-steps.png)
 
-A workflow execution instance has a _unique ID_, and each of the `step` method is executed _by a separate process_
+A workflow execution instance has a _unique ID_, and each of the `step` is executed _by a separate process_
 in the logical order based on the DAG.
 
-Metaflow documents contains a more detailed workflow lifecycle
-diagram [here](https://github.com/lizhaoliu/metaflow/blob/master/docs/lifecycle.png), but for now I'll keep it super
-simple.
+A more detailed workflow lifecyle diagram can be
+found [here](https://github.com/lizhaoliu/metaflow/blob/master/docs/lifecycle.png) in Metaflow docs archive.
 
 ### Entry Point
 
-A workflow class typically inherits from `FlowSpec` (in `metaflow/flowspec.py`). It starts off running right after
-the `__init__` method is called (some fields and comments below are omitted for brevity).
+A user-defined workflow class should inherit from `FlowSpec` (in `metaflow/flowspec.py`).
 
 ```python
 class FlowSpec(object):
@@ -203,8 +202,10 @@ class FlowSpec(object):
             cli.main(self)
 ```
 
-Here, the workflow DAG is constructed by `self._graph = FlowGraph(self.__class__)`. Then `cli.main(self)` is called to
-start executing the workflow. Now before we go after the execution part, let's look into the `FlowGraph` class.
+1. First, the workflow DAG is constructed with `self._graph = FlowGraph(self.__class__)`.
+2. The workflow starts running by `cli.main(self)`.
+
+Now before we go after the execution part, let's look into the `FlowGraph` class.
 
 ### FlowGraph
 
@@ -220,7 +221,7 @@ class FlowGraph(object):
         self._postprocess()
 ```
 
-The constructor has a workflow class as an argument, and it does the following things:
+Its constructor takes a workflow class as an argument, and it does the following things:
 
 1. Creates graph nodes and edges based on steps defined in the workflow - `self._create_nodes(flow_class)`.
 2. Traverses the graph to gather additional information (parents, fan-out, etc.) - `self._traverse_graph()`.
@@ -228,10 +229,10 @@ The constructor has a workflow class as an argument, and it does the following t
 
 #### Node Creation
 
-DAG nodes are created by `_create_nodes`. It takes in the workflow class as an argument, and returns a list of nodes.
-Have you wondered how Metaflow understands the workflow definition and creates a graph topology out of it? Well, it
-relies on the `ast` module (short for [_Abstract Syntax Tree -
-AST_](https://en.wikipedia.org/wiki/Abstract_syntax_tree)) for that, which we will read below:
+DAG nodes are created by `_create_nodes`. It inspects the workflow class source code, creates a graph topology out of
+it, and returns a dictionary of DAG nodes. Have you wondered how Metaflow does this? Well, it relies on `ast`
+module (short for [_Abstract Syntax Tree - AST_](https://en.wikipedia.org/wiki/Abstract_syntax_tree)) for that, which
+expresses the source code in a tree-like structure.
 
 ```python
 def _create_nodes(self, flow_class) -> dict[str, DAGNode]:
@@ -247,9 +248,9 @@ def _create_nodes(self, flow_class) -> dict[str, DAGNode]:
 
 1. Metaflow fetches source code of the workflow module, then it utilizes `ast` module to parse the code and builds an
    AST.
-2. The workflow class AST root is located by matching type `ast.ClassDef` and the name of the workflow class.
-3. A `StepVisitor` object traverses the AST and populates the dictionary of `{method_name -> DAGNode}`. Each step's
-   metadata is encapsulated by a `DAGNode` object.
+2. The workflow class AST root is retrieved by matching type `ast.ClassDef` and the name of the workflow class.
+3. A `StepVisitor` object traverses the workflow class AST and populates the dictionary of `{method_name -> DAGNode}`.
+   Each step's metadata is encapsulated by a `DAGNode` object.
 
 ```python
 class StepVisitor(ast.NodeVisitor):
@@ -574,9 +575,9 @@ Module(
 
 </details>
 
-#### Building a `DAGNode`
+#### Build a `DAGNode`
 
-As mentioned earlier, a `DAGNode` instance encapsulates the metadata of a step (some fields are omitted).
+As mentioned earlier, a `DAGNode` instance encapsulates the metadata of a `step` (some fields are omitted).
 
 ```python
 class DAGNode(object):
@@ -593,8 +594,7 @@ class DAGNode(object):
         self.matching_join = None  # The join (fan-in) step down the graph that matches current split (fan-out).
 ```
 
-Jumping into `_parse` method, which is responsible for determining the step `type` and `out_funcs` (child steps)
-.
+Jumping into `self._parse` method, which is responsible for determining the step `type` and `out_funcs` (child steps).
 
 ```python
 def _parse(self, func_ast):
@@ -658,11 +658,11 @@ def _parse(self, func_ast):
         return
 ```
 
-Some key takeaways from the code above:
+Key takeaways from the code above:
 
-1. The last statement in a valid step needs to be a call of `self.next` (except for `end` step).
+1. The last statement in a `step` must call `self.next` (except for `end` step).
 2. At most one keyword argument is allowed in a `self.next` call.
-3. A step is one of these types internally:
+3. A `step` is one of these types:
     - `linear`: single step in `self.next` call. This step must take no arguments except for `self`.
     - `join`: single step in `self.next` call. Must have at least one argument as inputs.
     - `split-and`: two or more steps in `self.next` call, _all of which_ are executed.

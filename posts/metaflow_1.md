@@ -11,10 +11,10 @@ get started.
 
 ### Why I Wrote This
 
-Metaflow codebase is not a colossus, and it's a rewarding learning experience parsing the source code without being
-drowned. In this series of articles, I'll be focusing on walking through implementation details of Metaflow, instead of
-on the general idea of how to use it. Note that I may add/remove comments in the original source code to help with the
-guidance.
+Metaflow codebase is not a colossus, and it's a rewarding learning experience digesting the source code without being
+overwhelmed. In this series of articles, I'll be focusing on walking through implementation details of Metaflow, instead
+of on the general idea of how to use it. Note that I may add/remove comments in the original source code to help with
+the guidance.
 
 There can (probably will) be mistakes in my writing, and what you see here may be outdated at some point.
 
@@ -72,14 +72,7 @@ if __name__ == '__main__':
 * The `self.next` function is invoked exactly once at the end of each step to specify the next step (_transition_). The
   entire workflow is logically structured as a _directed acyclic graph (DAG)_, and it is executed accordingly.
 
-```mermaid
-graph LR;
-    start --> a;
-    start --> b;
-    a --> join;
-    b --> join;
-    join --> END;
-```
+![](../images/simple-workflow.png)
 
 ### Role of a Step
 
@@ -87,63 +80,61 @@ Conceptually, a `step` wears one of three hats:
 
 #### Linear
 
-A `linear` step has exactly one parent step and one child step.
+A `linear` step has one parent step and one child step.
 
-```mermaid
-graph LR;
-    A --> Linear --> B;
-```
+![](../images/linear-step.png)
 
 #### Fan-Out
 
 A `fan-out` step has one parent step but two or more child steps, or one child step to be executed multiple times.
 
-- Branched fan-out, child steps are predefined in the workflow.
+- Static fan-out, multiple child steps are hard coded in the workflow.
 
-```mermaid
-graph LR;
-    A --> Fan-Out;
-    Fan-Out --> B;
-    Fan-Out --> C;
-```
+![](../images/static-fanout-step.png)
 
-- Foreach/parallel fan-out, where the number of child steps is not known in advance.
+- Foreach/parallel fan-out, where one child step is executed concurrently multiple times.
 
-```mermaid
-graph LR;
-    A --> Fan-Out;
-    Fan-Out --> B;
-    Fan-Out --> B;
-    Fan-Out --> B;
-```
+![](../images/foreach-fanout-step.png)
 
 #### Join (Fan-In)
 
 A `join` step has `fan-out` parent step(s) and one child step, the child step is executed once all the parent steps are
-completed.
+completed. This is the place to process the gathered results from parent fan-out steps.
 
-- Join from branched fan-out.
+- Join from static fan-out.
 
-```mermaid
-graph LR;
-    A --> Join;
-    B --> Join;
-    Join --> C; 
-```
+![](../images/static-join-step.png)
 
 - Join from foreach/parallel fan-out.
 
-```mermaid
-graph LR;
-    A --> Join;
-    A --> Join;
-    A --> Join;
-    Join --> C; 
+![](../images/foreach-join-step.png)
+
+### The `@step` Decorator
+
+Before we go right in, let's look at the `@step` decorator in `metaflow/decorators.py`:
+
+```python
+def step(f):
+    """
+    The step decorator. Makes a method a step in the workflow.
+    """
+    f.is_step = True
+    f.decorators = []
+    try:
+        # python 3
+        f.name = f.__name__
+    except:
+        # python 2
+        f.name = f.__func__.func_name
+    return f
 ```
 
-### Things that Metaflow Does for You
+Pretty straightforward. It marks a method as a step in the workflow simply by adding an attribute `is_step` to it, then
+later Metaflow recognizes it by checking the presence of that attribute.
 
-By running the code above, following output can be observed:
+### Lifecycle of a Metaflow Run
+
+By running the code of `BranchFlow` example, following output can be observed:
 
 ```text
 Metaflow 2.4.7 executing BranchFlow for user:lizhaoliu
@@ -168,43 +159,21 @@ Running pylint...
 2021-12-29 09:24:13.428 Done!
 ```
 
-From the log, we see that Metaflow has done the following:
+From the log, we see that Metaflow has done the following work sequentially:
 
-1. Graph (DAG) validation.
-2. Pylint checks.
-3. Executing the workflow.
+![](../images/workflow-steps.png)
 
-The `workflow` has a _unique ID_, and each of the `step` method is executed _by a separate process_
-in the logical order they are defined in the code. For now, we can keep that in mind, and I will get back to it in the
-next a few posts.
+A workflow execution instance has a _unique ID_, and each of the `step` method is executed _by a separate process_
+in the logical order based on the DAG.
 
-### A Step
+Metaflow documents contains a more detailed workflow lifecycle
+diagram [here](https://github.com/lizhaoliu/metaflow/blob/master/docs/lifecycle.png), but for now I'll keep it super
+simple.
 
-Before we go right in, let's look at the `@step` decorator in `metaflow/decorators.py`:
+### Entry Point
 
-```python
-def step(f: Callable) -> Callable:
-    """
-    The step decorator. Makes a method a step in the workflow.
-    """
-    f.is_step = True
-    f.decorators = []
-    try:
-        # python 3
-        f.name = f.__name__
-    except:
-        # python 2
-        f.name = f.__func__.func_name
-    return f
-```
-
-Pretty straightforward. It marks a method as a step in the workflow simply by adding an attribute `is_step` to it, then
-later Metaflow recognizes it by checking the presence of that attribute.
-
-### Main Entry Point
-
-Our workflow class inherits from `FlowSpec`, and it kicks off running right after the initializer is called. Now jumping
-into the `FlowSpec` class (some fields and comments are omitted for brevity) definition in `metaflow/flowspec.py`:
+A workflow class typically inherits from `FlowSpec` (in `metaflow/flowspec.py`). It starts off running right after
+the `__init__` method is called (some fields and comments below are omitted for brevity).
 
 ```python
 class FlowSpec(object):
@@ -231,17 +200,15 @@ class FlowSpec(object):
             # we import cli here to make sure custom parameters in
             # args.py get fully evaluated before cli.py is imported.
             from . import cli
-
             cli.main(self)
 ```
 
-As you would've guessed, a DAG is constructed by `self._graph = FlowGraph(self.__class__)`. Then `cli.main(self)` is
-called to start running the workflow. Next up let's look into the `FlowGraph` class.
+Here, the workflow DAG is constructed by `self._graph = FlowGraph(self.__class__)`. Then `cli.main(self)` is called to
+start executing the workflow. Now before we go after the execution part, let's look into the `FlowGraph` class.
 
 ### FlowGraph
 
-`FlowGraph` is the class that represents a directed acyclic graph (DAG). The source code is `metaflow/graph.py`. Its
-constructor is displayed below:
+`FlowGraph` (in `metaflow/graph.py`) is the class that represents a workflow DAG.
 
 ```python
 class FlowGraph(object):
@@ -253,17 +220,18 @@ class FlowGraph(object):
         self._postprocess()
 ```
 
-It has our custom workflow class as an argument, and then it does the following things:
+The constructor has a workflow class as an argument, and it does the following things:
 
-1. Creates graph nodes and edges based on the steps defined in the workflow - `self._create_nodes(flow_class)`.
-2. Traverses the graph to build additional metadata - `self._traverse_graph()`.
+1. Creates graph nodes and edges based on steps defined in the workflow - `self._create_nodes(flow_class)`.
+2. Traverses the graph to gather additional information (parents, fan-out, etc.) - `self._traverse_graph()`.
 3. Some postprocessing work - `self._postprocess()`.
 
 #### Node Creation
 
-First, DAG nodes are created by `_create_nodes`. It takes in the workflow class as an argument, and returns a list of
-nodes. Have you wondered how Metaflow inspects the workflow class and creates a graph topology out of it? Well, it
-relies on the `ast` module (short for _Abstract Syntax Tree - AST_) for that part, which we will observe below:
+DAG nodes are created by `_create_nodes`. It takes in the workflow class as an argument, and returns a list of nodes.
+Have you wondered how Metaflow understands the workflow definition and creates a graph topology out of it? Well, it
+relies on the `ast` module (short for [_Abstract Syntax Tree -
+AST_](https://en.wikipedia.org/wiki/Abstract_syntax_tree)) for that, which we will read below:
 
 ```python
 def _create_nodes(self, flow_class) -> dict[str, DAGNode]:
@@ -277,12 +245,11 @@ def _create_nodes(self, flow_class) -> dict[str, DAGNode]:
     return nodes
 ```
 
-1. Metaflow fetches source code of the module where the workflow is defined, then it utilizes `ast` module to parse the
-   that source code to build a module-level AST.
-2. The workflow class AST root is located by matching the type `ast.ClassDef` and the name of the workflow class.
-3. The `StepVisitor` class is used to traverse the AST and populates the dictionary of `{method_name -> DAGNode}`
-   for each step (remember `@step` decorator adds `is_step` attribute to each step). Each step's metadata is wrapped
-   into a `DAGNode` object.
+1. Metaflow fetches source code of the workflow module, then it utilizes `ast` module to parse the code and builds an
+   AST.
+2. The workflow class AST root is located by matching type `ast.ClassDef` and the name of the workflow class.
+3. A `StepVisitor` object traverses the AST and populates the dictionary of `{method_name -> DAGNode}`. Each step's
+   metadata is encapsulated by a `DAGNode` object.
 
 ```python
 class StepVisitor(ast.NodeVisitor):
@@ -297,13 +264,13 @@ class StepVisitor(ast.NodeVisitor):
             self.nodes[node.name] = DAGNode(node, func.decorators, func.__doc__)
 ```
 
-#### (Optional) Inspecting the AST
+#### (Optional) More on AST
 
-If you are unfamiliar with AST, you can read about
+If you are interested in knowing more about AST, you can read about
 it [here](https://greentreesnakes.readthedocs.io/en/latest/index.html),
 and [here](https://docs.python.org/3/library/ast.html).
 
-Curious of what `BranchFlow` module AST is like? You can parse it and make sense of it yourself below:
+Curious of what `BranchFlow` module AST is like? You can find it below and try to make sense of it:
 <details>
 <summary>Click to show AST</summary>
 
@@ -609,8 +576,7 @@ Module(
 
 #### Building a `DAGNode`
 
-As mentioned earlier, a `DAGNode` instance encapsulates the metadata of a step. Here is a list of essential fields for
-building the graph (some fields are omitted).
+As mentioned earlier, a `DAGNode` instance encapsulates the metadata of a step (some fields are omitted).
 
 ```python
 class DAGNode(object):
@@ -619,7 +585,7 @@ class DAGNode(object):
         self.type = None  # Type of this step.
         self.out_funcs = []  # Outbound/child step(s) (called in self.next).
         self.num_args = 0  # Number of arguments, including `self`.
-        self._parse(func_ast)  # Parses the function AST and captures the metadata.
+        self._parse(func_ast)  # Parses the function AST and updates the metadata.
 
         # these attributes are populated by _traverse_graph
         self.in_funcs = set()  # Inbound/parent step(s).
@@ -627,7 +593,7 @@ class DAGNode(object):
         self.matching_join = None  # The join (fan-in) step down the graph that matches current split (fan-out).
 ```
 
-Jumping into `_parse` method, which is responsible for determining the `type` and `out_funcs` (child steps)
+Jumping into `_parse` method, which is responsible for determining the step `type` and `out_funcs` (child steps)
 .
 
 ```python
@@ -692,23 +658,23 @@ def _parse(self, func_ast):
         return
 ```
 
-Some key takeaways from the above code:
+Some key takeaways from the code above:
 
-1. The last statement in a valid step should be a call of `self.next` (except for _end_ step).
-2. `self.next` call must have at most one keyword argument.
-3. A step can be one of these types:
+1. The last statement in a valid step needs to be a call of `self.next` (except for `end` step).
+2. At most one keyword argument is allowed in a `self.next` call.
+3. A step is one of these types internally:
     - `linear`: single step in `self.next` call. This step must take no arguments except for `self`.
+    - `join`: single step in `self.next` call. Must have at least one argument as inputs.
     - `split-and`: two or more steps in `self.next` call, _all of which_ are executed.
     - `split-or`: exactly two steps in `self.next` call, _one of which_ is executed, determined by the `condition`
       keyword argument.
     - `foreach` (`num_parallel`): single step in `self.next` call. The number of executions is dictated by the data size
       from `foreach` (`num_parallel`) keyword argument.
-    - `join`: single step in `self.next` call. Must have at least one argument as inputs (from parent steps).
-4. `split-and`, `split-or` and `foreach` are for _fan-out_, whereas `join` is for _fan-in_.
+4. `split-and`, `split-or` and `foreach` are _fan-out_, whereas `join` is _fan-in_.
 
 #### Graph Traversal
 
-Now that the DAG topology is constructed, Metaflow traverses the graph to update other crucial fields.
+Now that a DAG topology is constructed, Metaflow traverses the DAG to update other essential fields.
 
 ```python
 def _traverse_graph(self):
@@ -742,31 +708,15 @@ def _traverse_graph(self):
         node.in_funcs = sorted(node.in_funcs)
 ```
 
-The traversal is performed in a Depth First Search (DFS) routine, beginning from the _start_ step. There are a few
-fields that are updated along the way when each node is visited:
+The traversal is performed in a Depth First Search (DFS) fashion, beginning from the `start` step. There are a few
+fields that are updated each time a node/step is visited:
 
-- `node.in_funcs`: names of the parent steps, as opposed to `node.out_funcs` which are the child steps.
-- `node.split_parents`: a list of parent steps that started unclosed fan-out till current step. If a step has at least
-  one `split_parents` then it is inside an unclosed fan-out.
-- `node.matching_join`: name of the join/fan-in step down the graph that closes current fan-out.
+- `node.in_funcs`: parent steps, as opposed to `node.out_funcs` which are child steps.
+- `node.split_parents`: a list of upstream fan-out steps where each starts an unclosed (at this step) fan-out. If a step
+  has at least one `split_parents` then it is inside an unclosed fan-out.
+- `node.matching_join`: the downstream `join` step that closes the fan-out started by this step.
 
-```mermaid
-graph LR
-    start[Start matching_join=`Join`]
-    a[A split_parents=`Start`]
-    b[B split_parents=`Start`]
-    c[C split_parents=`Start`]
-    d[D split_parents=`Start`]
-    join[Join split_parents=`Start`]
-    END[End]
-    start --> a;
-    start --> b;
-    a --> c;
-    b --> d;
-    c --> join;
-    d --> join;
-    join --> END;
-```
+![](../images/split-parents.png)
 
 #### Graph Postprocess
 
@@ -787,9 +737,9 @@ def _postprocess(self):
 
 ### Lint Checks
 
-The `lint` module (`metaflow/lint.py`) contains a set of validity checks that are run on a DAG. From these checks we can
-see all the prerequisites Metaflow enforces. Should any of the checks fail, Metaflow raises an exception and tells you
-what and where the error is.
+The `lint` module (`metaflow/lint.py`) contains a set of validity checks that are run against a DAG. From these checks
+we can see all the prerequisites Metaflow enforces. Should any of the checks fail, Metaflow raises an exception and
+tells you what and where the error is.
 
 There are 15 checks in total, summarized below:
 
@@ -809,36 +759,24 @@ There are 15 checks in total, summarized below:
     * All fan-out steps must be joined before `end` is reached.
     * Any `join` step's parents must all have the _same_ fan-out step. The following graphs are illegal:
 
-```mermaid
-graph LR
-    start --> a;
-    start --> b;
-    a --> aa;
-    a --> ab;
-    aa --> join;
-    ab --> join;
-    b --> join;
-    join --> END;
-```
+![](../images/join-from-diff-fanout.png)
 
-```mermaid
-graph LR
-    start --> a;
-    start --> b;
-    a --> aa;
-    a --> ab;
-    b --> ba;
-    b --> bb;
-    aa --> ja;
-    ab --> jb;
-    ba --> ja;
-    bb --> jb;
-    ja --> join;
-    jb --> join;
-    join --> END;
-```
+![](../images/cross-join.png)
 
-* `check_empty_foreaches`: there must be at least one step between a `foreach` step and a `join` step.
-* `check_parallel_step_after_next`:
-* `check_parallel_foreach_calls_parallel_step`:
-* `check_nested_foreach`:
+* `check_empty_foreaches`: there must be at least one step between a `foreach` fan-out step and a `join` step.
+* `check_parallel_step_after_next`: child steps of a `parallel` fan-out step must all be `parallel`.
+* `check_parallel_foreach_calls_parallel_step`:  a step with `@parallel` decorator must be called by a `parallel` step.
+* `check_nested_foreach`: nested `foreach` fan-outs are not allowed.
+
+## Closing Thoughts
+
+It is a pleasure to decipher Metaflow, though there are a few things that I do not fully understand.
+
+1. A `join` step is qualified by having more than one argument (in `DAGNode._parse` method) besides `self`, not by the
+   number of parent steps it has. For example, if a step has multiple parent steps, but only `self` as an argument, then
+   it is NOT a `join`.
+2. From the DAG code alone, I don't see the reason why a `join` step's parents must all have the _same_ fan-out step. My
+   guess is that it is easier to synchronize the execution and data/or flow. This will be revisited in the future.
+
+That would be all for this post! Hopefully you have enjoyed reading. In next post, I will discuss the details of
+workflow execution.

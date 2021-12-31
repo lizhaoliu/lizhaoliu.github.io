@@ -1,5 +1,3 @@
 ## All posts
 
-* [Placeholder post](posts/placeholder.md)
-    > A dummy post
-
+* [Metaflow Deep Dive (1)](posts/metaflow_1.md)

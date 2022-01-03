@@ -52,17 +52,20 @@ def main(flow, args=None, handle_exceptions=True, entrypoint=None):
             raise
 ```
 
-Since `args` is not specified (`None`), the main process wraps the workflow instance into a `state` object and
-calls `start(auto_envvar_prefix="METAFLOW", obj=state)`. Now move our needle to the `start` function.
+1. The main process packs the workflow instance and entry point (interpreter binary and script paths) into a `state`
+   object.
+2. Calls `start(auto_envvar_prefix="METAFLOW", obj=state)` to kick off the workflow.
 
-### `cli.start`
+Now let's move to the `start` function.
 
-This is when things get slightly more complex, as Metaflow is tightly coupled with
+### `start`
+
+This is when things get slightly more complex, as Metaflow tightly couples with
 the [`click` library](https://palletsprojects.com/p/click/). It can be a bit tricky to get a clean view.
 
 #### Decorators
 
-First, this function has a lot of decorators, most of which come from `click`.
+First, it has a lot of decorators, most of which come from `click`.
 
 ```python
 # metaflow/cli.py
@@ -82,10 +85,10 @@ def start(
     ...
 ```
 
-* `@click.command` decorator stores (the decorated) `start` as a callback into a (
-  callable) `click.CommandCollection` instance, once called, it invokes `start` down the chain.
-* `@click.pass_context` decorator makes a `context` object that carries global (system and user-defined) states as an
-  argument to `start` (that's why you see `ctx` in the argument list, but not in actual invocation).
+* `@click.command` decorator stores (the decorated) `start` function as a callback into a `click.CommandCollection`
+  instance (a functor) which, once called, invokes `start` down the chain.
+* `@click.pass_context` decorator creates a `context` object that carries global (system and user-defined) states as an
+  argument to `start` (that's why you see `ctx` in the argument list, but not in invocation).
 
 #### Definition
 
@@ -224,9 +227,10 @@ def start(
         ctx.invoke(check)
 ```
 
-The code is chunky, though it simply does the following:
+Despite being chunky, the code simply does the following:
 
-* Puts a few runtime states into `ctx.obj`, an arbitrary object that stores user data. Notably the following are stored:
+* Packs a few runtime states into `ctx.obj`, an arbitrary object that stores user data. Notably the following are
+  getting stored:
     * The workflow DAG instance.
     * A `FlowDataStore` instance, that has-a either `LocalStorage` or `S3Storage` as workflow runtime data storge
       implementation.
@@ -236,9 +240,9 @@ The code is chunky, though it simply does the following:
   because when we run `python3 branch_flow.py run`, the subcommand `run` tells `click` library to invoke that function
   internally. Notably, `ctx.obj` is also passed along.
 
-### On `cli.run`
+### On `run`
 
-It is where the main show begins.
+This is where the main show begins.
 
 ```python
 # metaflow/cli.py
@@ -485,3 +489,4 @@ Key points to note:
 
 Alright, that's the main event loop! Now let's look at the rest of the code.
 
+TODO

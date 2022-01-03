@@ -6,10 +6,12 @@
 
 [Metaflow](https://metaflow.org/) is an open-source Python framework developed by Netflix for building fast and scalable
 data science and ML workflows. It offers a concise set of intuitive yet powerful APIs, enabling users to focus on
-expressing their workflow logic.
+expressing their workflow topology.
 
 If you are new to Metaflow, here are some excellent [tutorials](https://docs.metaflow.org/getting-started/install) to
 get started.
+
+This post focuses on the static analysis that is performed on a workflow.
 
 ![img.png](../images/metaflow-logo.png)
 
@@ -17,10 +19,10 @@ get started.
 
 Lately I joined Netflix to work on Metaflow, about which I'm keen on learning everything. Since I do not have much
 exposure to aspects such as functional and meta programming in Python, it is a rewarding learning experience digesting
-the source code. The codebase is not colossal, so I'm not drowned in the details (so far) :).
+the source code. The codebase is not colossal, so I'm not buried in all the details (so far).
 
-In this series of articles, I'll be focusing on walking through some implementation details of Metaflow. These writings
-will serve as my notes as well as (hopefully) reference for you.
+In this series of articles, I'll be walking through major implementation details of Metaflow. These writings will serve
+as my notes as well as (hopefully) reference for you.
 
 ## Entering the Playground
 
@@ -223,7 +225,7 @@ Now before we go after the execution part, let's look into the `FlowGraph` class
 
 ### FlowGraph
 
-`FlowGraph` (in `metaflow/graph.py`) is the class that represents a workflow DAG.
+`FlowGraph` is the class that represents a workflow DAG.
 
 ```python
 # metaflow/graph.py
@@ -291,9 +293,10 @@ If you are interested in knowing more about AST, you can read about
 it [here](https://greentreesnakes.readthedocs.io/en/latest/index.html),
 and [here](https://docs.python.org/3/library/ast.html).
 
-Curious of what `BranchFlow` module AST is like? You can find it below and try to make sense of it:
+BTW, I attached `BranchFlow` module AST below, you can try making sense of it:
 <details>
 <summary>Show AST</summary>
+<p>
 
 ```text
 Module(
@@ -593,9 +596,10 @@ Module(
 )
 ```
 
+</p>
 </details>
 
-#### Build a `DAGNode`
+#### Building a `DAGNode`
 
 As mentioned earlier, a `DAGNode` instance encapsulates the metadata of a `step` (some fields are omitted).
 

@@ -2,6 +2,7 @@
 
 ![img.png](../images/arrows.png)
 
+Previous Post(s):
 > [Metaflow Deep Dive (1) - Static Analysis](./metaflow-deep-dive-1.md)
 
 In my [last post](./metaflow-deep-dive-1.md), I covered Metaflow's static graph analysis. Now let's move forward with
@@ -59,7 +60,7 @@ calls `start(auto_envvar_prefix="METAFLOW", obj=state)`. Now move our needle to 
 This is when things get slightly more complex, as Metaflow is tightly coupled with
 the [`click` library](https://palletsprojects.com/p/click/). It can be a bit tricky to get a clean view.
 
-#### Signature
+#### Decorators
 
 First, this function has a lot of decorators, most of which come from `click`.
 
@@ -76,18 +77,7 @@ First, this function has a lot of decorators, most of which come from `click`.
 @click.pass_context
 def start(
         ctx,
-        quiet=False,
-        metadata=None,
-        environment=None,
-        datastore=None,
-        datastore_root=None,
-        decospecs=None,
-        package_suffixes=None,
-        pylint=None,
-        coverage=None,
-        event_logger=None,
-        monitor=None,
-        **deco_options
+        ...
 ):
     ...
 ```
@@ -97,12 +87,9 @@ def start(
 * `@click.pass_context` decorator makes a `context` object that carries global (system and user-defined) states as an
   argument to `start` (that's why you see `ctx` in the argument list, but not in actual invocation).
 
-#### Body
+#### Definition
 
-Now let's look at the `start` function body.
-
-<details>
-<summary>Click to expand</summary>
+Now moving on to the `start` function body.
 
 ```python
 # metaflow/cli.py
@@ -237,15 +224,13 @@ def start(
         ctx.invoke(check)
 ```
 
-</details>
-
 The code is chunky, though it simply does the following:
 
 * Puts a few runtime states into `ctx.obj`, an arbitrary object that stores user data. Notably the following are stored:
     * The workflow DAG instance.
     * A `FlowDataStore` instance, that has-a either `LocalStorage` or `S3Storage` as workflow runtime data storge
       implementation.
-    * A `MetadataProvider` instance.
+    * A `MetadataProvider` instance, which I will cover later.
     * A `Monitor` instance, running as a separate _process_ (called `sidecar`) to monitor the flow and gather metrics.
 * Calls `cli.run` in the end to enter the main execution lifecycle. You may not see the call of `cli.run`, this is
   because when we run `python3 branch_flow.py run`, the subcommand `run` tells `click` library to invoke that function
@@ -302,21 +287,17 @@ What happens here is:
 1. `before_run(...)` performs all the gate-keeping checks such as DAG validation and pylint.
 2. `obj.flow._set_constants(kwargs)` sets the `Parameter` values as attributes of the workflow instance.
 3. A `NativeRuntime` instance is created using all the global states carried over by `ctx.obj`.
-    1. `runtime.persist_constants()` persists workflow parameters before the `start` step.
-    2. `runtime.execute()` actually starts the workflow execution.
+    1. `runtime.persist_constants()` persists workflow parameters before the `start` step fires off.
+    2. `runtime.execute()` starts the workflow execution.
 
 ### Workflow Runtime
 
 As mentioned earlier, `NativeRuntime` is the core component of a workflow to orchestrate the execution of the tasks.
 
 At the heart, it runs an _event loop_ that implements _producer-consumer pattern_, where the producer is the workflow
-and the consumer is the worker processes.
+and the consumer is the worker processes. It is the pump that drives the workflow execution.
 
 #### `NativeRuntime` constructor
-
-<details>
-
-<summary>Expand Code</summary>
 
 ```python
 # metaflow/runtime.py
@@ -411,8 +392,6 @@ class NativeRuntime(object):
                 deco.runtime_init(flow, graph, package, self._run_id)
 ```
 
-</details>
-
 1. A unique `run_id` is generated for the new run. As for a local run, it simply uses the current timestamp.
 2. A `ProcPoll` instance is created. It is used to track (by polling at a fixed interval) the worker processes.
 
@@ -500,6 +479,9 @@ Key points to note:
    workers in the pool, the loop continues:
     1. `finished_tasks = list(self._poll_workers())` fetches the previously finished tasks from the worker pool.
     2. `self._queue_tasks(finished_tasks)` pushes the child `steps` of the finished tasks to the `queue`.
-    3. `self._launch_workers()` for each `step` remaining in the `queue`, dequeues it and creates a new worker
+    3. `self._launch_workers()`: for each `step` remaining in the `queue`, dequeues it and creates a new worker
        _process_ (if the worker pool capacity is not reached) to run.
-    5. Should there be an unexpected exception, the loop kills all workers and exits.
+    5. Should there be an unexpected exception, the loop terminates all in-flight workers and exits.
+
+Alright, that's the main event loop! Now let's look at the rest of the code.
+

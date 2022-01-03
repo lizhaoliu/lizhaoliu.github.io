@@ -1,4 +1,6 @@
-# Metaflow Deep Dive (1)
+# Metaflow Deep Dive (1) - Static Analysis
+
+![img.png](../images/deep-dive.png)
 
 ## Introduction
 
@@ -6,15 +8,19 @@
 data science and ML workflows. It offers a concise set of intuitive yet powerful APIs, enabling users to focus on
 expressing their workflow logic.
 
-If you are new to Metaflow, here are some well written [tutorials](https://docs.metaflow.org/getting-started/install) to
+If you are new to Metaflow, here are some excellent [tutorials](https://docs.metaflow.org/getting-started/install) to
 get started.
+
+![img.png](../images/metaflow-logo.png)
 
 ### Why I Wrote This
 
-Recently I joined Netflix to work on Metaflow, and I'm keen on learning everything about it. Metaflow codebase is not
-colossal, and I find it a rewarding learning experience digesting the source code, without getting overwhelmed. In this
-series of articles, I'll be focusing on walking through implementation details of Metaflow. These posts will serve as my
-notes as well as reference for you.
+Lately I joined Netflix to work on Metaflow, about which I'm keen on learning everything. Since I do not have much
+exposure to aspects such as functional and meta programming in Python, it is a rewarding learning experience digesting
+the source code. The codebase is not colossal, so I'm not drowned in the details (so far) :).
+
+In this series of articles, I'll be focusing on walking through some implementation details of Metaflow. These writings
+will serve as my notes as well as (hopefully) reference for you.
 
 ## Entering the Playground
 
@@ -24,9 +30,12 @@ notes as well as reference for you.
 - Metaflow: 2.4.7
 - OS: macOS Monterey 12.0.1
 
+With an editor/IDE that offers a handy code navigation and debugger support, you can easily follow along with my
+progress in this series.
+
 ### A Sample Workflow
 
-Let's start with a simple workflow:
+Let's start with a simple workflow, namely `branch_flow.py`:
 
 ```python
 from metaflow import FlowSpec, step
@@ -112,9 +121,11 @@ completed. This is the place to process the gathered results from parent fan-out
 
 ### The `@step` Decorator
 
-Before we move on, let's look at the `@step` decorator in `metaflow/decorators.py`:
+Before we move on, let's just inspect the `@step` decorator in `metaflow/decorators.py`:
 
 ```python
+# metaflow/decorators.py
+
 def step(f):
     """
     The step decorator. Makes a method a step in the workflow.
@@ -130,12 +141,13 @@ def step(f):
     return f
 ```
 
-Clearly, it marks a method as a `step` simply by adding an attribute `is_step` to it, such that Metaflow can recognize
-it later by checking the presence of that attribute.
+Okay, it simply marks a method as a `step` by adding an attribute `is_step` to it, such that Metaflow can recognize it
+later by checking the presence of that attribute.
 
 ### Lifecycle of a Metaflow Run
 
-By running the code of `BranchFlow` example, following output (or similar) can be observed:
+By running the code of `BranchFlow` example with `python3 branch_flow.py run`, following output (or similar) can be
+observed:
 
 ```text
 Metaflow 2.4.7 executing BranchFlow for user:lizhaoliu
@@ -175,6 +187,8 @@ found [here](https://github.com/lizhaoliu/metaflow/blob/master/docs/lifecycle.pn
 A user-defined workflow class should inherit from `FlowSpec` (in `metaflow/flowspec.py`).
 
 ```python
+# metaflow/flowspec.py
+
 class FlowSpec(object):
     def __init__(self, use_cli=True):
         """
@@ -203,7 +217,7 @@ class FlowSpec(object):
 ```
 
 1. First, the workflow DAG is constructed with `self._graph = FlowGraph(self.__class__)`.
-2. The workflow starts running by `cli.main(self)`.
+2. Workflow is then started by `cli.main(self)`.
 
 Now before we go after the execution part, let's look into the `FlowGraph` class.
 
@@ -212,6 +226,8 @@ Now before we go after the execution part, let's look into the `FlowGraph` class
 `FlowGraph` (in `metaflow/graph.py`) is the class that represents a workflow DAG.
 
 ```python
+# metaflow/graph.py
+
 class FlowGraph(object):
     def __init__(self, flow_class):
         self.name = flow_class.__name__
@@ -235,6 +251,8 @@ module (short for [_Abstract Syntax Tree - AST_](https://en.wikipedia.org/wiki/A
 expresses the source code in a tree-like structure.
 
 ```python
+# metaflow/graph.py
+
 def _create_nodes(self, flow_class) -> dict[str, DAGNode]:
     module = __import__(flow_class.__module__)
     tree = ast.parse(inspect.getsource(module)).body
@@ -253,6 +271,8 @@ def _create_nodes(self, flow_class) -> dict[str, DAGNode]:
    Each step's metadata is encapsulated by a `DAGNode` object.
 
 ```python
+# metaflow/graph.py
+
 class StepVisitor(ast.NodeVisitor):
     def __init__(self, nodes, flow):
         self.nodes = nodes
@@ -273,7 +293,7 @@ and [here](https://docs.python.org/3/library/ast.html).
 
 Curious of what `BranchFlow` module AST is like? You can find it below and try to make sense of it:
 <details>
-<summary>Click to show AST</summary>
+<summary>Show AST</summary>
 
 ```text
 Module(
@@ -580,6 +600,8 @@ Module(
 As mentioned earlier, a `DAGNode` instance encapsulates the metadata of a `step` (some fields are omitted).
 
 ```python
+# metaflow/graph.py
+
 class DAGNode(object):
     def __init__(self, func_ast, decos, doc):
         # these attributes are populated by _parse
@@ -597,6 +619,8 @@ class DAGNode(object):
 Jumping into `self._parse` method, which is responsible for determining the step `type` and `out_funcs` (child steps).
 
 ```python
+# metaflow/graph.py
+
 def _parse(self, func_ast):
     self.num_args = len(func_ast.args.args)
     tail = func_ast.body[-1]
@@ -677,6 +701,8 @@ Key takeaways from the code above:
 Now that a DAG topology is constructed, Metaflow traverses the DAG to update other essential fields.
 
 ```python
+# metaflow/graph.py
+
 def _traverse_graph(self):
     def traverse(node, seen, split_parents):
         if node.type in ("split-or", "split-and", "foreach"):
@@ -708,7 +734,7 @@ def _traverse_graph(self):
         node.in_funcs = sorted(node.in_funcs)
 ```
 
-The traversal is performed in a Depth First Search (DFS) fashion, beginning from the `start` step. There are a few
+The traversal is performed in a _Depth First Search (DFS)_ fashion, beginning from the `start` step. There are a few
 fields that are updated each time a node/step is visited:
 
 - `node.in_funcs`: parent steps, as opposed to `node.out_funcs` which are child steps.
@@ -723,6 +749,8 @@ fields that are updated each time a node/step is visited:
 The postprocessing step simply examines if each node is inside an unclosed `foreach` fan-out.
 
 ```python
+# metaflow/graph.py
+
 def _postprocess(self):
     # any node who has a foreach as any of its split parents
     # has is_inside_foreach=True *unless* all of those foreaches

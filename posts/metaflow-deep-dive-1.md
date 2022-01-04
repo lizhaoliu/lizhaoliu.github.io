@@ -249,15 +249,16 @@ tree representation.
 ```python
 # metaflow/graph.py
 
-def _create_nodes(self, flow_class) -> dict[str, DAGNode]:
-    module = __import__(flow_class.__module__)
-    tree = ast.parse(inspect.getsource(module)).body
-    root = [n for n in tree if isinstance(n, ast.ClassDef) and n.name == self.name][
-        0
-    ]
-    nodes = {}
-    StepVisitor(nodes, flow_class).visit(root)
-    return nodes
+class FlowGraph(object):
+    def _create_nodes(self, flow_class) -> dict[str, DAGNode]:
+        module = __import__(flow_class.__module__)
+        tree = ast.parse(inspect.getsource(module)).body
+        root = [n for n in tree if isinstance(n, ast.ClassDef) and n.name == self.name][
+            0
+        ]
+        nodes = {}
+        StepVisitor(nodes, flow_class).visit(root)
+        return nodes
 ```
 
 1. Metaflow fetches source code of the workflow module, then `ast` module is used to parse the code and builds an AST.
@@ -314,65 +315,66 @@ class DAGNode(object):
 ```python
 # metaflow/graph.py
 
-def _parse(self, func_ast):
-    self.num_args = len(func_ast.args.args)
-    tail = func_ast.body[-1]
+class DAGNode(object):
+    def _parse(self, func_ast):
+        self.num_args = len(func_ast.args.args)
+        tail = func_ast.body[-1]
 
-    # end doesn't need a transition
-    if self.name == "end":
-        # TYPE: end
-        self.type = "end"
+        # end doesn't need a transition
+        if self.name == "end":
+            # TYPE: end
+            self.type = "end"
 
-    # ensure that the tail an expression (a call of `self.next` is expected)
-    if not isinstance(tail, ast.Expr):
-        return
-
-    # determine the type of self.next transition
-    try:
-        if not self._expr_str(tail.value.func) == "self.next":
+        # ensure that the tail an expression (a call of `self.next` is expected)
+        if not isinstance(tail, ast.Expr):
             return
 
-        self.has_tail_next = True
-        self.invalid_tail_next = True
-        self.tail_next_lineno = tail.lineno
-        self.out_funcs = [e.attr for e in tail.value.args]
+        # determine the type of self.next transition
+        try:
+            if not self._expr_str(tail.value.func) == "self.next":
+                return
 
-        # Keyword arguments in `self.next` call.
-        next_kwargs = dict(
-            (k.arg, getattr(k.value, "s", None)) for k in tail.value.keywords
-        )
-        if len(next_kwargs) == 1:
-            if "foreach" in next_kwargs:
-                # TYPE: foreach
-                self.type = "foreach"
-                if len(self.out_funcs) == 1:
-                    self.foreach_param = next_kwargs["foreach"]
+            self.has_tail_next = True
+            self.invalid_tail_next = True
+            self.tail_next_lineno = tail.lineno
+            self.out_funcs = [e.attr for e in tail.value.args]
+
+            # Keyword arguments in `self.next` call.
+            next_kwargs = dict(
+                (k.arg, getattr(k.value, "s", None)) for k in tail.value.keywords
+            )
+            if len(next_kwargs) == 1:
+                if "foreach" in next_kwargs:
+                    # TYPE: foreach
+                    self.type = "foreach"
+                    if len(self.out_funcs) == 1:
+                        self.foreach_param = next_kwargs["foreach"]
+                        self.invalid_tail_next = False
+                elif "num_parallel" in next_kwargs:
+                    self.type = "foreach"
+                    self.parallel_foreach = True
+                    if len(self.out_funcs) == 1:
+                        self.invalid_tail_next = False
+                elif "condition" in next_kwargs:
+                    # TYPE: split-or
+                    self.type = "split-or"
+                    if len(self.out_funcs) == 2:
+                        self.condition = next_kwargs["condition"]
+                        self.invalid_tail_next = False
+            elif len(next_kwargs) == 0:
+                if len(self.out_funcs) > 1:
+                    # TYPE: split-and
+                    self.type = "split-and"
                     self.invalid_tail_next = False
-            elif "num_parallel" in next_kwargs:
-                self.type = "foreach"
-                self.parallel_foreach = True
-                if len(self.out_funcs) == 1:
+                elif len(self.out_funcs) == 1:
+                    # TYPE: linear
+                    if self.num_args > 1:
+                        self.type = "join"
+                    else:
+                        self.type = "linear"
                     self.invalid_tail_next = False
-            elif "condition" in next_kwargs:
-                # TYPE: split-or
-                self.type = "split-or"
-                if len(self.out_funcs) == 2:
-                    self.condition = next_kwargs["condition"]
-                    self.invalid_tail_next = False
-        elif len(next_kwargs) == 0:
-            if len(self.out_funcs) > 1:
-                # TYPE: split-and
-                self.type = "split-and"
-                self.invalid_tail_next = False
-            elif len(self.out_funcs) == 1:
-                # TYPE: linear
-                if self.num_args > 1:
-                    self.type = "join"
-                else:
-                    self.type = "linear"
-                self.invalid_tail_next = False
-    except AttributeError:
-        return
+        except AttributeError:
+            return
 ```
 
 Key takeaways from `_parse(..)`:
@@ -396,35 +398,36 @@ Now that a DAG is successfully built, Metaflow traverses it to update other esse
 ```python
 # metaflow/graph.py
 
-def _traverse_graph(self):
-    def traverse(node, seen, split_parents):
-        if node.type in ("split-or", "split-and", "foreach"):
-            node.split_parents = split_parents
-            split_parents = split_parents + [node.name]
-        elif node.type == "join":
-            # ignore joins without splits
-            if split_parents:
-                self[split_parents[-1]].matching_join = node.name
+class FlowGraph(object):
+    def _traverse_graph(self):
+        def traverse(node, seen, split_parents):
+            if node.type in ("split-or", "split-and", "foreach"):
                 node.split_parents = split_parents
-                split_parents = split_parents[:-1]
-        else:
-            node.split_parents = split_parents
+                split_parents = split_parents + [node.name]
+            elif node.type == "join":
+                # ignore joins without splits
+                if split_parents:
+                    self[split_parents[-1]].matching_join = node.name
+                    node.split_parents = split_parents
+                    split_parents = split_parents[:-1]
+            else:
+                node.split_parents = split_parents
 
-        for n in node.out_funcs:
-            # graph may contain loops - ignore them
-            if n not in seen:
-                # graph may contain unknown transitions - ignore them
-                if n in self:
-                    child = self[n]
-                    child.in_funcs.add(node.name)
-                    traverse(child, seen + [n], split_parents)
+            for n in node.out_funcs:
+                # graph may contain loops - ignore them
+                if n not in seen:
+                    # graph may contain unknown transitions - ignore them
+                    if n in self:
+                        child = self[n]
+                        child.in_funcs.add(node.name)
+                        traverse(child, seen + [n], split_parents)
 
-    if "start" in self:
-        traverse(self["start"], [], [])
+        if "start" in self:
+            traverse(self["start"], [], [])
 
-    # fix the order of in_funcs
-    for node in self.nodes.values():
-        node.in_funcs = sorted(node.in_funcs)
+        # fix the order of in_funcs
+        for node in self.nodes.values():
+            node.in_funcs = sorted(node.in_funcs)
 ```
 
 The traversal is performed in a _Depth First Search (DFS)_ fashion, beginning from the `start` step.
@@ -445,16 +448,17 @@ The postprocessing marks if a node is inside an ongoing `foreach` fan-out.
 ```python
 # metaflow/graph.py
 
-def _postprocess(self):
-    # any node who has a foreach as any of its split parents
-    # has is_inside_foreach=True *unless* all of those foreaches
-    # are joined by the node
-    for node in self.nodes.values():
-        foreaches = [
-            p for p in node.split_parents if self.nodes[p].type == "foreach"
-        ]
-        if [f for f in foreaches if self.nodes[f].matching_join != node.name]:
-            node.is_inside_foreach = True
+class FlowGraph(object):
+    def _postprocess(self):
+        # any node who has a foreach as any of its split parents
+        # has is_inside_foreach=True *unless* all of those foreaches
+        # are joined by the node
+        for node in self.nodes.values():
+            foreaches = [
+                p for p in node.split_parents if self.nodes[p].type == "foreach"
+            ]
+            if [f for f in foreaches if self.nodes[f].matching_join != node.name]:
+                node.is_inside_foreach = True
 ```
 
 ### Lint Checks

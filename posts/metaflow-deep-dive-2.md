@@ -298,8 +298,8 @@ What happens here is:
 
 As mentioned earlier, `NativeRuntime` is the core component of a workflow to orchestrate the execution of the tasks.
 
-At the heart, it runs an _event loop_ that implements _producer-consumer pattern_, where the producer is the workflow
-and the consumer is the worker processes. It is the pump that drives the workflow execution.
+At its heart, a runtime runs an _event loop_ that implements _producer-consumer pattern_, where the producer is the
+workflow topology and the consumer is the worker processes. Runtime is the pump that drives the workflow execution.
 
 #### `NativeRuntime` constructor
 
@@ -401,9 +401,6 @@ class NativeRuntime(object):
 
 #### Dissecting `NativeRuntime.execute`
 
-<details>
-<summary>Expand Code</summary>
-
 ```python
 # metaflow/runtime.py
 
@@ -423,13 +420,11 @@ class NativeRuntime(Runtime):
             # main scheduling loop
             exception = None
             while self._run_queue or self._num_active_workers > 0:
-
                 # 1. are any of the current workers finished?
                 finished_tasks = list(self._poll_workers())
                 # 2. push new tasks triggered by the finished tasks to the queue
                 self._queue_tasks(finished_tasks)
-                # 3. if there are available worker slots, pop and start tasks
-                #    from the queue.
+                # 3. if there are available worker slots, pop and start tasks from the queue.
                 self._launch_workers()
 
                 if time.time() - progress_tstamp > PROGRESS_INTERVAL:
@@ -466,16 +461,12 @@ class NativeRuntime(Runtime):
         if ("end", ()) in self._finished:
             self._logger("Done!", system_msg=True)
         else:
-            raise MetaflowInternalError(
-                "The *end* step was not successful " "by the end of flow."
-            )
+            raise MetaflowInternalError("The *end* step was not successful " "by the end of flow.")
 ```
 
-</details>
+Summary:
 
-Key points to note:
-
-1. This method (event loop) is not thread-safe and should be run by a single thread.
+1. The event loop is not thread-safe and should be run by a single thread.
 2. `self._metadata.start_run_heartbeat(..)` starts a heartbeat service for the run. But it is a no-op if only running
    locally.
 3. `self._queue_push("start", ..)` enqueues the seeding `start` task to the `queue`.
@@ -487,6 +478,155 @@ Key points to note:
        _process_ (if the worker pool capacity is not reached) to run.
     5. Should there be an unexpected exception, the loop terminates all in-flight workers and exits.
 
-Alright, that's the main event loop! Now let's look at the rest of the code.
+Alright, that's it! Now let's move on to the rest of the code.
+
+#### Notes on `_poll_workers()`
+
+```python
+# metaflow/runtime.py
+
+class NativeRuntime(Runtime):
+    def _poll_workers(self):
+        if self._workers:
+            for event in self._poll.poll(PROGRESS_INTERVAL):
+                worker = self._workers.get(event.fd)
+                if worker:
+                    if event.can_read:
+                        worker.read_logline(event.fd)
+                    if event.is_terminated:
+                        returncode = worker.terminate()
+
+                        for fd in worker.fds():
+                            self._poll.remove(fd)
+                            del self._workers[fd]
+                        self._num_active_workers -= 1
+
+                        task = worker.task
+                        if returncode:
+                            # worker did not finish successfully
+                            if worker.cleaned or returncode == METAFLOW_EXIT_DISALLOW_RETRY:
+                                self._logger(
+                                    "This failed task will not be " "retried.",
+                                    system_msg=True,
+                                )
+                            else:
+                                if task.retries < task.user_code_retries + task.error_retries:
+                                    self._retry_worker(worker)
+                                else:
+                                    raise TaskFailed(task)
+                        else:
+                            # worker finished successfully
+                            yield task
+```
+
+1. Keeps polling the worker pool at a fixed rate for any I/O events.
+2. Once an event emerges, it retrieves the associated worker (by `fd`).
+3. If that event is in terminated state (task finished or failed), the worker is removed from the pool.
+4. Depending on the return code, the task is either returned (finished) or retried (failed).
+
+### Task
+
+`Task` represents a single `step` in the workflow. It packs all data that is needed to be plugged into a worker.
+
+### Worker
+
+`Worker` is the execution unit of the workflow. It is responsible for executing a single task (`step`) in a dedicated
+_process_.
+
+#### Constructor
+
+```python
+# metaflow/runtime.py
+
+class Worker(object):
+    def __init__(self, task: Task, max_logs_size: int):
+
+        self.task = task
+        self._proc = self._launch()
+
+        if task.retries > task.user_code_retries:
+            self.task.log(
+                "Task fallback is starting to handle the failure.",
+                system_msg=True,
+                pid=self._proc.pid,
+            )
+        elif not task.is_cloned:
+            suffix = " (retry)." if task.retries else "."
+            self.task.log(
+                "Task is starting" + suffix, system_msg=True, pid=self._proc.pid
+            )
+
+        self._stdout = TruncatedBuffer("stdout", max_logs_size)
+        self._stderr = TruncatedBuffer("stderr", max_logs_size)
+
+        self._logs = {
+            self._proc.stderr.fileno(): (self._proc.stderr, self._stderr),
+            self._proc.stdout.fileno(): (self._proc.stdout, self._stdout),
+        }
+
+        self._encoding = sys.stdout.encoding or "UTF-8"
+        self.killed = False  # Killed indicates that the task was forcibly killed
+        # with SIGKILL by the master process.
+        # A killed task is always considered cleaned
+        self.cleaned = False  # A cleaned task is one that is shutting down and has been
+        # noticed by the runtime and queried for its state (whether or
+        # not is is properly shut down)
+```
+
+Once a worker is instantiated, an underlying process is spawn to run the task.
+
+#### Process Creation
+
+```python
+# metaflow/runtime.py
+
+class Worker(object):
+    def _launch(self):
+        args = CLIArgs(self.task)
+        env = dict(os.environ)
+
+        if self.task.clone_run_id:
+            args.command_options["clone-run-id"] = self.task.clone_run_id
+
+        if self.task.is_cloned and self.task.clone_origin:
+            args.command_options["clone-only"] = self.task.clone_origin
+            # disabling atlas sidecar for cloned tasks due to perf reasons
+            args.top_level_options["monitor"] = "nullSidecarMonitor"
+        else:
+            # decorators may modify the CLIArgs object in-place
+            for deco in self.task.decos:
+                deco.runtime_step_cli(
+                    args,
+                    self.task.retries,
+                    self.task.user_code_retries,
+                    self.task.ubf_context,
+                )
+        env.update(args.get_env())
+        env["PYTHONUNBUFFERED"] = "x"
+        # NOTE bufsize=1 below enables line buffering which is required
+        # by read_logline() below that relies on readline() not blocking
+        # print('running', args)
+        cmdline = args.get_args()
+        debug.subcommand_exec(cmdline)
+        return subprocess.Popen(
+            cmdline,
+            env=env,
+            bufsize=1,
+            stdin=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+        )
+```
+
+This unveils how a worker process is spawned:
+
+1. `args = CLIArgs(self.task)` constructs the command line arguments from the task specification, they are used to spawn
+   a process. Notably:
+    1. Entry point of the arguments are [`python_interpreter_path`, `main_script_path`].
+    2. It adds "step" to the command line arguments as a subcommand, so that `cli.step` function will be called (
+       by `click` framework) in the worker process to run that specific `step`.
+2. `subprocess.Popen(..)` spawns a process object with the CLI arguments and env vars.
+
+### cli.step
 
 TODO

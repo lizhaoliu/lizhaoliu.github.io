@@ -1,4 +1,4 @@
-# Metaflow Deep Dive (2) - Runtimes
+# Metaflow Deep Dive (2) - Runtime
 
 ![img.png](../images/arrows.png)
 
@@ -8,7 +8,11 @@ Previous Post(s):
 In my [last post](./metaflow-deep-dive-1.md), I covered Metaflow's static graph analysis. Now let's move forward with
 the workflow runtime.
 
-## Core of the Workflow
+## Core of the Workflow Runtime
+
+Metaflow implemented its own process worker pool based on *NIX system polling mechanism.
+This [documentation](https://github.com/lizhaoliu/metaflow/blob/master/docs/concurrency.md) explains why Metaflow made
+such choice.
 
 ### Revisit the Entry Point
 
@@ -623,10 +627,86 @@ This unveils how a worker process is spawned:
 1. `args = CLIArgs(self.task)` constructs the command line arguments from the task specification, they are used to spawn
    a process. Notably:
     1. Entry point of the arguments are [`python_interpreter_path`, `main_script_path`].
-    2. It adds "step" to the command line arguments as a subcommand, so that `cli.step` function will be called (
+    2. It adds "step" to the CLI args as a subcommand, so that `cli.step` function will be called (
        by `click` framework) in the worker process to run that specific `step`.
 2. `subprocess.Popen(..)` spawns a process object with the CLI arguments and env vars.
 
 ### cli.step
 
-TODO
+This is where a `step` code is retrieved and executed.
+
+```python
+# metaflow/cli.py
+
+@cli.command(help="Internal command to execute a single task.")
+@click.argument("step-name")
+# Omitted @click.option decorators.
+@click.pass_context
+def step(
+        ctx,
+        step_name,
+        # Omitted other kwargs.
+):
+    if ubf_context == "none":
+        ubf_context = None
+    if opt_namespace is not None:
+        namespace(opt_namespace or None)
+
+    func = None
+    try:
+        func = getattr(ctx.obj.flow, step_name)
+    except:
+        raise CommandException("Step *%s* doesn't exist." % step_name)
+    if not func.is_step:
+        raise CommandException("Function *%s* is not a step." % step_name)
+    echo("Executing a step, *%s*" % step_name, fg="magenta", bold=False)
+
+    if decospecs:
+        decorators._attach_decorators_to_step(func, decospecs)
+
+    step_kwargs = ctx.params
+    # Remove argument `step_name` from `step_kwargs`.
+    step_kwargs.pop("step_name", None)
+    # Remove `opt_*` prefix from (some) option keys.
+    step_kwargs = dict(
+        [(k[4:], v) if k.startswith("opt_") else (k, v) for k, v in step_kwargs.items()]
+    )
+    cli_args._set_step_kwargs(step_kwargs)
+
+    ctx.obj.metadata.add_sticky_tags(tags=opt_tag)
+    paths = decompress_list(input_paths) if input_paths else []
+
+    task = MetaflowTask(
+        ctx.obj.flow,
+        ctx.obj.flow_datastore,
+        ctx.obj.metadata,
+        ctx.obj.environment,
+        ctx.obj.echo,
+        ctx.obj.event_logger,
+        ctx.obj.monitor,
+        ubf_context,
+    )
+    if clone_only:
+        task.clone_only(step_name, run_id, task_id, clone_only, retry_count)
+    else:
+        task.run_step(
+            step_name,
+            run_id,
+            task_id,
+            clone_run_id,
+            paths,
+            split_index,
+            retry_count,
+            max_user_code_retries,
+        )
+
+    echo("Success", fg="green", bold=True, indent=True)
+```
+
+Key takeaways:
+
+1. The decorator `@click.argument("step-name")` adds a `step_name` argument to the CLI.
+2. `func = getattr(ctx.obj.flow, step_name)` fetches the `step` function from the flow object. And
+   then `decorators._attach_decorators_to_step(func, decospecs)` attaches additional decorators to that `step`
+   function.
+3. A `MetaflowTask` object is created and used to run the `step`.

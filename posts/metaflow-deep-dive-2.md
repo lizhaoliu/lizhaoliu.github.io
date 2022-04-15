@@ -91,6 +91,7 @@ def start(
 
 * `@click.command` decorator stores (the decorated) `start` function as a callback into a `click.CommandCollection`
   instance (a functor) which, once called, invokes `start` down the chain.
+* `sources=[cli] + plugins.get_plugin_cli()` combines subcommands defined by `cli`, which includes `run`.
 * `@click.pass_context` decorator creates a `context` object that carries global (system and user-defined) states as an
   argument to `start` (that's why you see `ctx` in the argument list, but not in invocation). It also adds an `obj`
   argument, and that's how the `state` instance is passed in.
